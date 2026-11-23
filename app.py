@@ -176,20 +176,50 @@ def contact_candidates(model, U):
     return contacts
 
 
-def contact_matrix_rhs(model, U, kp, active_prev=None):
-    ndof=2*len(model['nodes']); Kc=np.zeros((ndof,ndof)); rhs=np.zeros(ndof)
-    active=[]; data=[]
-    X0=model['nodes']
-    for s,a,b,xi,n,gap in contact_candidates(model,U):
-        if gap < 0.0:
-            dofs=np.array([2*s,2*s+1,2*a,2*a+1,2*b,2*b+1])
-            G=np.r_[n, -(1-xi)*n, -xi*n]
-            g0=float((X0[s]-((1-xi)*X0[a]+xi*X0[b]))@n)
-            Kc[np.ix_(dofs,dofs)] += kp*np.outer(G,G)
-            rhs[dofs] += -kp*g0*G
-            active.append((s,a,b)); data.append((s,gap,-kp*gap,xi))
-    return Kc,rhs,tuple(active),data
+def slave_tributary_lengths(model, U):
+    """Lunghezza tributaria di ogni nodo slave nella configurazione corrente.
 
+    Il nodo sull'asse e il nodo terminale ricevono meta del segmento adiacente;
+    un nodo interno riceve meta dei due segmenti adiacenti. Nel mezzo modello
+    queste lunghezze sono riferite alla sola meta destra del contatto.
+    """
+    X = model['nodes'] + U.reshape(-1, 2)
+    slave = model['ring_contact']
+    w = np.zeros(len(slave))
+    if len(slave) < 2:
+        return {int(slave[0]): 0.0} if len(slave) else {}
+    seg = np.linalg.norm(np.diff(X[slave], axis=0), axis=1)
+    w[0] = 0.5 * seg[0]
+    w[-1] = 0.5 * seg[-1]
+    if len(slave) > 2:
+        w[1:-1] = 0.5 * (seg[:-1] + seg[1:])
+    return {int(n): float(wi) for n, wi in zip(slave, w)}
+
+def contact_matrix_rhs(model, U, kp, active_prev=None):
+    """Assembla un contatto penalty integrato sulla superficie slave.
+
+    kp ha unita pressione/lunghezza; p_i = -kp*g_i e la forza nodale
+    equivalente e p_i moltiplicata per la lunghezza tributaria del nodo.
+    """
+    ndof = 2*len(model['nodes'])
+    Kc = np.zeros((ndof, ndof))
+    rhs = np.zeros(ndof)
+    active, data = [], []
+    X0 = model['nodes']
+    weights = slave_tributary_lengths(model, U)
+    for sn, a, b, xi, n, gap in contact_candidates(model, U):
+        if gap < 0.0:
+            dofs = np.array([2*sn,2*sn+1,2*a,2*a+1,2*b,2*b+1])
+            G = np.r_[n, -(1-xi)*n, -xi*n]
+            g0 = float((X0[sn]-((1-xi)*X0[a]+xi*X0[b])) @ n)
+            tributary = weights[sn]
+            pressure = -kp*gap
+            nodal_force = pressure*tributary
+            Kc[np.ix_(dofs,dofs)] += kp*tributary*np.outer(G,G)
+            rhs[dofs] += -kp*tributary*g0*G
+            active.append((sn,a,b))
+            data.append((sn,gap,pressure,xi,tributary,nodal_force))
+    return Kc, rhs, tuple(active), data
 
 def solve_dirichlet(K, rhs, prescribed):
     nd=len(rhs); fixed=np.array(sorted(prescribed),int); vals=np.array([prescribed[i] for i in fixed])
@@ -261,15 +291,72 @@ def one_step(model,p,S):
         if err<p['tol'] and active==old: converged=True; break
         old=active
     reaction=S['K']@U; force=-2*sum(reaction[2*n+1] for n in model['ring_top'])
-    amap={q[0]:q[2] for q in cdata}; diag=[]
+    amap={q[0]:q for q in cdata}; diag=[]
     for sn,a,b,xi,n,gap in contact_candidates(model,U):
-        diag.append({'slave':sn,'a':a,'b':b,'xi':xi,'gap':gap,'pressure':amap.get(sn,0.),'active':sn in amap})
+        info=amap.get(sn)
+        diag.append({'slave':sn,'a':a,'b':b,'xi':xi,'gap':gap,
+                     'pressure':info[2] if info else 0.0,
+                     'tributary':info[4] if info else slave_tributary_lengths(model,U).get(sn,0.0),
+                     'contact_force':info[5] if info else 0.0,
+                     'active':sn in amap})
     row=[delta,force,sum(q['active'] for q in diag),it,converged,min(q['gap'] for q in diag),max(q['pressure'] for q in diag)]
     S['U']=U; S['step']=step; S['history'].append(row); S['shots'].append({'U':U.copy(),'delta':delta,'force':force,'diag':diag,'log':log,'converged':converged})
     S['finished']=step>=p['n_steps'] or not converged
     return S
 
 def signature(p): return tuple((k,float(v)) for k,v in p.items())
+
+def contact_pressure_results(model, shot):
+    """Restituisce pressione media e distribuzione discreta nel mezzo modello."""
+    X = model['nodes'] + shot['U'].reshape(-1, 2)
+    D = sorted(shot['diag'], key=lambda q: X[q['slave'], 0])
+    x = np.array([X[q['slave'],0] for q in D], float)
+    gap = np.array([q['gap'] for q in D], float)
+    pressure = np.array([q['pressure'] for q in D], float)
+    active = np.array([q['active'] for q in D], bool)
+
+    # Bordo di contatto per interpolazione lineare del passaggio g<0 -> g>=0.
+    a = 0.0
+    ids = np.where(active)[0]
+    if len(ids):
+        j = ids[-1]
+        if j+1 < len(D) and gap[j] < 0.0 and gap[j+1] >= 0.0:
+            den = gap[j+1]-gap[j]
+            a = x[j] + (-gap[j]/den)*(x[j+1]-x[j]) if abs(den)>1e-15 else x[j]
+        else:
+            # Estremo tributario se tutti i nodi successivi non sono disponibili.
+            a = x[j] + 0.5*D[j].get('tributary',0.0)
+
+    total_width = 2.0*a
+    mean_pressure = shot['force']/total_width if total_width > 0 else 0.0
+    integrated_half_force = sum(q.get('contact_force',0.0) for q in D)
+    balance_error = (2*integrated_half_force-shot['force'])/max(abs(shot['force']),1e-15)
+    return dict(x=x, gap=gap, pressure=pressure, active=active,
+                half_width=a, total_width=total_width,
+                mean_pressure=mean_pressure,
+                integrated_total_force=2*integrated_half_force,
+                balance_error=balance_error)
+
+
+def fig_pressure_distribution(model, shot):
+    import plotly.graph_objects as go
+    R = contact_pressure_results(model, shot)
+    mask = R['active']
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=R['x'][mask], y=R['pressure'][mask],
+                             mode='lines+markers', name='Pressione locale penalty integrata',
+                             line=dict(color='#d84315', width=3), marker=dict(size=8)))
+    if R['total_width'] > 0:
+        fig.add_trace(go.Scatter(x=[0,R['half_width']],
+                                 y=[R['mean_pressure'],R['mean_pressure']],
+                                 mode='lines', name='Pressione media equivalente',
+                                 line=dict(color='#1565c0', width=3, dash='dash')))
+    fig.update_layout(title='Distribuzione della pressione nella zona di contatto (mezzo modello)',
+                      height=430, dragmode='zoom', hovermode='x unified',
+                      xaxis_title='Coordinata x sulla superficie di contatto',
+                      yaxis_title='Pressione di contatto',
+                      margin=dict(l=20,r=20,t=55,b=20), legend=dict(orientation='h'))
+    return fig
 
 def fig_mesh(model, U=None, scale=1.0, mesh=True, title=''):
     import plotly.graph_objects as go
@@ -339,8 +426,8 @@ def fig_contact(model,shot,width,height,scale):
 def fig_gap(shot):
     import plotly.graph_objects as go
     i=np.arange(len(shot['diag'])); g=[q['gap'] for q in shot['diag']]; p=[q['pressure'] for q in shot['diag']]
-    fig=go.Figure(); fig.add_bar(x=i,y=p,name='Pressione penalty',marker_color='orange'); fig.add_scatter(x=i,y=g,name='Gap',mode='lines+markers',yaxis='y2')
-    fig.update_layout(title='Gap e pressione lungo i nodi slave',height=400,dragmode='zoom',yaxis={'title':'Pressione'},yaxis2={'title':'Gap','overlaying':'y','side':'right'},xaxis_title='Indice nodo slave',hovermode='x unified'); return fig
+    fig=go.Figure(); fig.add_bar(x=i,y=p,name='Pressione locale penalty',marker_color='orange'); fig.add_scatter(x=i,y=g,name='Gap',mode='lines+markers',yaxis='y2')
+    fig.update_layout(title='Gap e pressione locale lungo i nodi slave',height=400,dragmode='zoom',yaxis={'title':'Pressione'},yaxis2={'title':'Gap','overlaying':'y','side':'right'},xaxis_title='Indice nodo slave',hovermode='x unified'); return fig
 
 def fig_history(H):
     import plotly.graph_objects as go
@@ -459,11 +546,20 @@ with t3:
         shot = S['shots'][k-1]
         row = S['history'][k-1]
         m=st.columns(5); m[0].metric('Step',f"{k}/{p['n_steps']}"); m[1].metric('δ',f"{shot['delta']:.5g}"); m[2].metric('Reazione',f"{shot['force']:.5g}"); m[3].metric('Contatti',row[2]); m[4].metric('Iterazioni',row[3])
+        pressure_result = contact_pressure_results(model, shot)
+        pm = st.columns(4)
+        pm[0].metric('Ampiezza contatto totale', f"{pressure_result['total_width']:.5g}")
+        pm[1].metric('Pressione media', f"{pressure_result['mean_pressure']:.5g}")
+        pm[2].metric('Forza integrata dal contatto', f"{pressure_result['integrated_total_force']:.5g}")
+        pm[3].metric('Errore equilibrio contatto', f"{100*pressure_result['balance_error']:.3g}%")
         st.markdown('**Rombi arancioni:** contatti attivi. **Linee tratteggiate:** proiezione nodo-segmento. Un gap negativo attiva la molla penalty.')
         x,y=st.columns(2)
         with x: st.plotly_chart(fig_mesh(model,shot['U'],scale,True,f'Deformata step {k}, scala ×{scale:g}'),use_container_width=True,config=config)
         with y: st.plotly_chart(fig_contact(model,shot,zoom_w,zoom_h,scale),use_container_width=True,config=config)
-        st.plotly_chart(fig_gap(shot),use_container_width=True,config=config); st.plotly_chart(fig_history(S['history'][:k]),use_container_width=True,config=config)
+        st.plotly_chart(fig_pressure_distribution(model, shot), use_container_width=True, config=config)
+        st.caption('La curva locale deriva dalla formulazione penalty integrata con lunghezze tributarie. È la distribuzione discreta coerente con questo modello; non è una ricostruzione analitica di Hertz.')
+        st.plotly_chart(fig_gap(shot),use_container_width=True,config=config)
+        st.plotly_chart(fig_history(S['history'][:k]),use_container_width=True,config=config)
         with st.expander('Iterazioni interne dello step'): st.dataframe(shot['log'],use_container_width=True,hide_index=True)
         st.download_button('Scarica storia CSV',csv_history(S['history']),'storia_incrementale.csv','text/csv')
 with st.expander('Uso dello zoom'): st.write('Rotella: zoom. Trascinamento: rettangolo di zoom. Doppio clic: reset. La barra Plotly consente pan, autoscale e salvataggio PNG.')
