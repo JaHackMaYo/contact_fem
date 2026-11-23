@@ -214,16 +214,57 @@ def one_step(model,p,S):
 
 def signature(p): return tuple((k,float(v)) for k,v in p.items())
 
-def fig_mesh(model,U=None,scale=1.,mesh=True,title=''):
+def fig_mesh(model, U=None, scale=1.0, mesh=True, title=''):
     import plotly.graph_objects as go
-    X=model['nodes'].copy() if U is None else model['nodes']+scale*U.reshape(-1,2); fig=go.Figure()
-    for mat,col,name in [(0,'rgba(255,40,40,.42)','Blocco'),(1,'rgba(20,20,20,.72)','Semianello')]:
-        first=True
-        for tri in model['elems'][model['mats']==mat]:
-            z=X[np.r_[tri,tri[0]]]; fig.add_trace(go.Scatter(x=z[:,0],y=z[:,1],mode='lines',fill='toself',fillcolor=col,
-              line={'color':'#555' if mesh else col,'width':.55},name=name,legendgroup=name,showlegend=first,hoverinfo='skip')); first=False
-    fig.update_layout(title=title,height=590,dragmode='zoom',margin={'l':20,'r':20,'t':50,'b':20},xaxis_title='x',yaxis_title='y')
-    fig.update_yaxes(scaleanchor='x',scaleratio=1); return fig
+
+    X = model['nodes'].copy() if U is None else model['nodes'] + scale * U.reshape(-1, 2)
+    fig = go.Figure()
+
+    materials = [
+        (0, 'rgba(255,40,40,0.42)', 'Blocco'),
+        (1, 'rgba(35,35,35,0.78)', 'Semianello'),
+    ]
+
+    # Riempimento dei domini. I bordi vengono aggiunti separatamente,
+    # così la mesh del semianello rimane visibile sul fondo scuro.
+    for mat, fill_color, name in materials:
+        first = True
+        for tri in model['elems'][model['mats'] == mat]:
+            z = X[np.r_[tri, tri[0]]]
+            fig.add_trace(go.Scatter(
+                x=z[:, 0], y=z[:, 1], mode='lines', fill='toself',
+                fillcolor=fill_color,
+                line=dict(color=fill_color, width=0.2),
+                name=name, legendgroup=name, showlegend=first,
+                hoverinfo='skip'
+            ))
+            first = False
+
+    if mesh:
+        mesh_styles = [
+            (0, 'rgba(110,0,0,0.82)', 0.8, 'Mesh blocco'),
+            (1, 'rgba(255,255,255,0.95)', 1.1, 'Mesh semianello'),
+        ]
+        for mat, line_color, line_width, name in mesh_styles:
+            x_lines, y_lines = [], []
+            for tri in model['elems'][model['mats'] == mat]:
+                z = X[np.r_[tri, tri[0]]]
+                x_lines.extend(z[:, 0].tolist() + [None])
+                y_lines.extend(z[:, 1].tolist() + [None])
+            fig.add_trace(go.Scatter(
+                x=x_lines, y=y_lines, mode='lines',
+                line=dict(color=line_color, width=line_width),
+                name=name, legendgroup=name, hoverinfo='skip'
+            ))
+
+    fig.update_layout(
+        title=title, height=590, dragmode='zoom',
+        margin=dict(l=20, r=20, t=50, b=20),
+        xaxis_title='x', yaxis_title='y',
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0.0)
+    )
+    fig.update_yaxes(scaleanchor='x', scaleratio=1)
+    return fig
 
 def fig_contact(model,shot,width,height,scale):
     import plotly.graph_objects as go
@@ -281,7 +322,20 @@ with t3:
     elif st.session_state.get('sig')!=sig: st.warning('Parametri modificati: inizializzare nuovamente.')
     elif st.session_state.S['step']==0: st.plotly_chart(fig_mesh(model,title='Stato iniziale'),use_container_width=True,config=config)
     else:
-        S=st.session_state.S; k=st.slider('Incremento da visualizzare',1,S['step'],S['step']); shot=S['shots'][k-1]; row=S['history'][k-1]
+        S = st.session_state.S
+        if S['step'] == 1:
+            k = 1
+            st.caption('Incremento visualizzato: 1. Lo slider sarà disponibile dal secondo incremento.')
+        else:
+            k = st.slider(
+                'Incremento da visualizzare',
+                min_value=1,
+                max_value=S['step'],
+                value=S['step'],
+                step=1,
+            )
+        shot = S['shots'][k-1]
+        row = S['history'][k-1]
         m=st.columns(5); m[0].metric('Step',f'{k}/{n_steps}'); m[1].metric('δ',f"{shot['delta']:.5g}"); m[2].metric('Reazione',f"{shot['force']:.5g}"); m[3].metric('Contatti',row[2]); m[4].metric('Iterazioni',row[3])
         st.markdown('**Rombi arancioni:** contatti attivi. **Linee tratteggiate:** proiezione nodo-segmento. Un gap negativo attiva la molla penalty.')
         x,y=st.columns(2)
