@@ -182,116 +182,112 @@ def element_results(model,U,cache):
     return np.array(vm),np.array(syy)
 
 # -----------------------------
-# Grafici
+# Solutore didattico incrementale
 # -----------------------------
-def plot_model(model, U=None, field=None, title='', scale=1.0, mesh=True):
-    X=model['nodes'].copy() if U is None else model['nodes']+scale*U.reshape(-1,2)
-    fig,ax=plt.subplots(figsize=(9,5.6))
-    polys=X[model['elems']]
-    if field is None:
-        colors=np.where(model['mats']==0,0.2,0.85)
-        pc=PolyCollection(polys,array=colors,cmap='coolwarm',edgecolors='k' if mesh else 'none',linewidths=.25)
-    else:
-        pc=PolyCollection(polys,array=np.asarray(field),cmap='turbo',edgecolors='k' if mesh else 'none',linewidths=.15)
-    ax.add_collection(pc); ax.autoscale(); ax.set_aspect('equal'); ax.set_title(title); ax.set_xlabel('x'); ax.set_ylabel('y'); ax.grid(alpha=.15)
-    if field is not None: fig.colorbar(pc,ax=ax,shrink=.8)
-    fig.tight_layout(); return fig
+def init_state(model,p):
+    K,cache=assemble_bulk(model,p['E_block'],p['nu_block'],p['E_ring'],p['nu_ring'])
+    fixed={}
+    for n in model['block_bottom']: fixed[2*n]=0.; fixed[2*n+1]=0.
+    for n in np.unique(np.r_[model['block_sym'],model['ring_sym']]): fixed[2*n]=0.
+    return {'K':K,'cache':cache,'fixed':fixed,'U':np.zeros(K.shape[0]),'step':0,'history':[],'shots':[],'finished':False}
 
+def one_step(model,p,S):
+    if S['finished']: return S
+    step=S['step']+1; delta=p['delta_max']*step/p['n_steps']; U=S['U'].copy(); old=None; log=[]; converged=False
+    for it in range(1,p['max_iter']+1):
+        Kc,rhs,active,cdata=contact_matrix_rhs(model,U,p['kp']); bc=dict(S['fixed'])
+        for n in model['ring_top']: bc[2*n+1]=-delta
+        V=solve_dirichlet(S['K']+Kc,rhs,bc)
+        err=np.linalg.norm(V-U)/max(np.linalg.norm(V),delta,1e-12)
+        log.append({'iterazione':it,'variazione_relativa':err,'contatti_attivi':len(active),'penetrazione_max':max([-q[1] for q in cdata],default=0.)})
+        U=(1-p['relax'])*U+p['relax']*V
+        if err<p['tol'] and active==old: converged=True; break
+        old=active
+    reaction=S['K']@U; force=-2*sum(reaction[2*n+1] for n in model['ring_top'])
+    amap={q[0]:q[2] for q in cdata}; diag=[]
+    for sn,a,b,xi,n,gap in contact_candidates(model,U):
+        diag.append({'slave':sn,'a':a,'b':b,'xi':xi,'gap':gap,'pressure':amap.get(sn,0.),'active':sn in amap})
+    row=[delta,force,sum(q['active'] for q in diag),it,converged,min(q['gap'] for q in diag),max(q['pressure'] for q in diag)]
+    S['U']=U; S['step']=step; S['history'].append(row); S['shots'].append({'U':U.copy(),'delta':delta,'force':force,'diag':diag,'log':log,'converged':converged})
+    S['finished']=step>=p['n_steps'] or not converged
+    return S
 
-def csv_history(hist):
-    out='delta,reazione_totale_per_unita_profondita,contatti_attivi,iterazioni,convergenza\n'
-    for r in hist: out += f'{float(r[0]):.12g},{float(r[1]):.12g},{int(r[2])},{int(r[3])},{bool(r[4])}\n'
-    return out
+def signature(p): return tuple((k,float(v)) for k,v in p.items())
 
-# -----------------------------
-# UI Streamlit
-# -----------------------------
-st.title('FEM 2D da zero: contatto semianello–blocco')
-st.caption('Plane strain, materiali elastici lineari, CST, contatto frictionless penalty, mezzo modello per simmetria.')
+def fig_mesh(model,U=None,scale=1.,mesh=True,title=''):
+    import plotly.graph_objects as go
+    X=model['nodes'].copy() if U is None else model['nodes']+scale*U.reshape(-1,2); fig=go.Figure()
+    for mat,col,name in [(0,'rgba(255,40,40,.42)','Blocco'),(1,'rgba(20,20,20,.72)','Semianello')]:
+        first=True
+        for tri in model['elems'][model['mats']==mat]:
+            z=X[np.r_[tri,tri[0]]]; fig.add_trace(go.Scatter(x=z[:,0],y=z[:,1],mode='lines',fill='toself',fillcolor=col,
+              line={'color':'#555' if mesh else col,'width':.55},name=name,legendgroup=name,showlegend=first,hoverinfo='skip')); first=False
+    fig.update_layout(title=title,height=590,dragmode='zoom',margin={'l':20,'r':20,'t':50,'b':20},xaxis_title='x',yaxis_title='y')
+    fig.update_yaxes(scaleanchor='x',scaleratio=1); return fig
 
+def fig_contact(model,shot,width,height,scale):
+    import plotly.graph_objects as go
+    X=model['nodes']+scale*shot['U'].reshape(-1,2); master=model['block_top']; master=master[np.argsort(X[master,0])]; D={q['slave']:q for q in shot['diag']}; fig=go.Figure()
+    fig.add_trace(go.Scatter(x=X[master,0],y=X[master,1],mode='lines+markers',name='Master: blocco',line={'color':'red','width':3}))
+    free=[n for n in model['ring_contact'] if not D[n]['active']]; act=[n for n in model['ring_contact'] if D[n]['active']]
+    if free: fig.add_trace(go.Scatter(x=X[free,0],y=X[free,1],mode='lines+markers',name='Slave liberi',line={'color':'#455a64'}))
+    if act: fig.add_trace(go.Scatter(x=X[act,0],y=X[act,1],mode='markers',name='Contatto attivo',marker={'color':'orange','size':11,'symbol':'diamond'}))
+    for n in model['ring_contact']:
+        q=D[n]; P=(1-q['xi'])*X[q['a']]+q['xi']*X[q['b']]
+        fig.add_trace(go.Scatter(x=[X[n,0],P[0]],y=[X[n,1],P[1]],mode='lines',showlegend=False,line={'dash':'dot','color':'orange' if q['active'] else '#90caf9'},hovertext=f"gap={q['gap']:.4g}<br>p={q['pressure']:.4g}",hoverinfo='text'))
+    fig.update_layout(title='Dettaglio contatto: nodi, proiezioni e active set',height=590,dragmode='zoom',xaxis_title='x',yaxis_title='y',margin={'l':20,'r':20,'t':50,'b':20})
+    fig.update_xaxes(range=[0,width]); fig.update_yaxes(range=[-height,height],scaleanchor='x',scaleratio=1); return fig
+
+def fig_gap(shot):
+    import plotly.graph_objects as go
+    i=np.arange(len(shot['diag'])); g=[q['gap'] for q in shot['diag']]; p=[q['pressure'] for q in shot['diag']]
+    fig=go.Figure(); fig.add_bar(x=i,y=p,name='Pressione penalty',marker_color='orange'); fig.add_scatter(x=i,y=g,name='Gap',mode='lines+markers',yaxis='y2')
+    fig.update_layout(title='Gap e pressione lungo i nodi slave',height=400,dragmode='zoom',yaxis={'title':'Pressione'},yaxis2={'title':'Gap','overlaying':'y','side':'right'},xaxis_title='Indice nodo slave',hovermode='x unified'); return fig
+
+def fig_history(H):
+    import plotly.graph_objects as go
+    A=np.asarray(H,object); fig=go.Figure(go.Scatter(x=A[:,0].astype(float),y=A[:,1].astype(float),mode='lines+markers'))
+    fig.update_layout(title='Curva forza-spostamento fino allo step selezionato',height=400,dragmode='zoom',xaxis_title='δ',yaxis_title='Reazione totale / profondità'); return fig
+
+def csv_history(H):
+    out='delta,reazione,contatti,iterazioni,convergenza,gap_minimo,pressione_massima\n'
+    return out+''.join(f'{r[0]},{r[1]},{r[2]},{r[3]},{r[4]},{r[5]},{r[6]}\n' for r in H)
+
+st.title('FEM 2D didattico: contatto semianello-blocco')
+st.caption('Esecuzione incremento per incremento con visualizzazione interattiva dell’active set, del gap e della pressione penalty.')
 with st.sidebar:
-    st.header('Geometria')
-    ri=st.number_input('Raggio interno ri',0.1,value=40.0)
-    re=st.number_input('Raggio esterno re',0.2,value=60.0)
-    L=st.number_input('Semilarghezza blocco L',1.0,value=240.0)
-    h=st.number_input('Altezza blocco h',1.0,value=180.0)
-    st.header('Materiali')
-    E_ring=st.number_input('E semianello',1.0,value=210000.0)
-    nu_ring=st.number_input('nu semianello',0.0,0.499,value=0.30,format='%.3f')
-    E_block=st.number_input('E blocco',1.0,value=30000.0)
-    nu_block=st.number_input('nu blocco',0.0,0.499,value=0.20,format='%.3f')
-    st.header('Mesh guidata dal contatto')
-    h_contact=st.number_input('Dimensione elemento al contatto',0.05,value=2.0,step=0.25,
-                              help='Lunghezza obiettivo sul bordo esterno del semianello e sulla superficie del blocco.')
-    mesh_growth=st.slider('Fattore crescita elementi',1.02,1.60,1.22,.01)
-    hmax_factor=st.slider('Dimensione massima / dimensione contatto',2.0,20.0,8.0,.5)
-    st.header('Soluzione')
-    delta_max=st.number_input('Spostamento massimo',0.0001,value=1.0,format='%.4f')
-    n_steps=st.slider('Incrementi',1,50,12)
-    penalty_factor=st.number_input('Fattore penalty α',1.0,value=50.0)
-    max_iter=st.slider('Iterazioni per incremento',5,100,35)
-    tol=st.number_input('Tolleranza relativa',value=1e-7,format='%.1e')
-    relax=st.slider('Rilassamento',0.1,1.0,0.8,.05)
-
-if not (re>ri and L>re and h>0): st.error('Richiesto: re > ri, L > re e h > 0.'); st.stop()
-# scala penalty coerente con la dimensione locale del contatto
-Eeff=2.0/(1.0/E_ring+1.0/E_block); kp=penalty_factor*Eeff/h_contact
-p=dict(ri=ri,re=re,L=L,h=h,E_ring=E_ring,nu_ring=nu_ring,E_block=E_block,nu_block=nu_block,
-       h_contact=h_contact,mesh_growth=mesh_growth,hmax_factor=hmax_factor,
-       delta_max=delta_max,n_steps=n_steps,kp=kp,max_iter=max_iter,tol=tol,relax=relax)
-
+    st.header('Geometria'); ri=st.number_input('Raggio interno ri',.1,value=40.); re=st.number_input('Raggio esterno re',.2,value=60.); L=st.number_input('Semilarghezza L',1.,value=240.); h=st.number_input('Altezza h',1.,value=180.)
+    st.header('Materiali'); E_ring=st.number_input('E semianello',1.,value=210000.); nu_ring=st.number_input('nu semianello',0.,.499,value=.3); E_block=st.number_input('E blocco',1.,value=30000.); nu_block=st.number_input('nu blocco',0.,.499,value=.2)
+    st.header('Mesh'); h_contact=st.number_input('Elemento al contatto',.05,value=2.,step=.25); mesh_growth=st.slider('Crescita elementi',1.02,1.6,1.22,.01); hmax_factor=st.slider('h max / h contatto',2.,20.,8.,.5)
+    st.header('Soluzione'); delta_max=st.number_input('Spostamento massimo',.0001,value=1.); n_steps=st.slider('Incrementi',1,50,12); penalty_factor=st.number_input('Fattore penalty',1.,value=50.); max_iter=st.slider('Iterazioni massime',5,100,35); tol=st.number_input('Tolleranza',value=1e-7,format='%.1e'); relax=st.slider('Rilassamento',.1,1.,.8,.05)
+    st.header('Vista'); scale=st.slider('Scala deformata',0.,20.,1.,.5); zoom_w=st.number_input('Ampiezza zoom contatto',1.,value=30.); zoom_h=st.number_input('Semialtezza zoom',.1,value=8.)
+if not(re>ri and L>re and h>0): st.error('Richiesto re > ri, L > re, h > 0'); st.stop()
+Eeff=2/(1/E_ring+1/E_block); kp=penalty_factor*Eeff/h_contact
+p=dict(ri=ri,re=re,L=L,h=h,E_ring=E_ring,nu_ring=nu_ring,E_block=E_block,nu_block=nu_block,h_contact=h_contact,mesh_growth=mesh_growth,hmax_factor=hmax_factor,delta_max=delta_max,n_steps=n_steps,kp=kp,max_iter=max_iter,tol=tol,relax=relax)
 try: model=build_model(p)
-except Exception as ex: st.error(str(ex)); st.stop()
-
-c1,c2,c3,c4=st.columns(4)
-c1.metric('Nodi',len(model['nodes'])); c2.metric('Elementi CST',len(model['elems']))
-c3.metric('GDL',2*len(model['nodes'])); c4.metric('Penalty kc',f'{kp:.3g}')
-mi=model['mesh_info']; st.caption(f"Mesh derivata: semianello {mi['nt']} settori × {mi['nr']} strati; blocco {mi['nx']} × {mi['ny']} celle. Passi x: {mi['min_dx']:.3g}–{mi['max_dx']:.3g}; passi y: {mi['min_dy']:.3g}–{mi['max_dy']:.3g}.")
-
-tab1,tab2,tab3=st.tabs(['Geometria','Mesh','Soluzione e risultati'])
-with tab1:
-    st.pyplot(plot_model(model,mesh=False,title='Geometria del mezzo modello'))
-    st.info('Il centro del semianello è a y = re; il punto esterno inferiore è inizialmente a y = 0. Lo spostamento è imposto sul bordo radiale orizzontale a destra.')
-with tab2:
-    st.pyplot(plot_model(model,mesh=True,title='Mesh strutturata parametrica'))
-    st.write('La dimensione scelta al contatto genera la discretizzazione dell’arco esterno. Le stesse ascisse sono trasferite alla superficie del blocco; gli elementi crescono poi gradualmente verso destra, in profondità e attraverso lo spessore del semianello.')
-with tab3:
-    if st.button('Risolvi',type='primary',use_container_width=True):
-        prog=st.progress(0,text='Preparazione')
-        try:
-            U,hist,cache,cdata=solve_model(model,p,prog)
-            prog.empty(); vm,syy=element_results(model,U,cache)
-            st.session_state['solution']=(p,model,U,hist,vm,syy,cdata)
-        except np.linalg.LinAlgError:
-            prog.empty(); st.error('Sistema singolare o mal condizionato. Aumentare la mesh, ridurre il penalty o controllare i vincoli.')
-        except Exception as ex:
-            prog.empty(); st.exception(ex)
-    if 'solution' in st.session_state:
-        ps,ms,U,hist,vm,syy,cdata=st.session_state['solution']
-        if any(ps[k]!=p[k] for k in ['ri','re','L','h','h_contact','mesh_growth','hmax_factor','delta_max','kp']):
-            st.warning('I parametri sono cambiati dopo l’ultima soluzione. Premere nuovamente Risolvi.')
-        last=hist[-1]; a,b,c,d=st.columns(4)
-        a.metric('δ raggiunto',f'{float(last[0]):.5g}')
-        b.metric('Reazione totale',f'{float(last[1]):.5g}')
-        c.metric('Contatti attivi',int(last[2])); d.metric('Convergenza','Sì' if bool(last[4]) else 'No')
-        if not bool(last[4]): st.error('Ultimo incremento non convergente: i risultati vanno considerati non validati.')
-        scale=st.slider('Scala deformata',0.0,20.0,1.0,.5)
-        left,right=st.columns(2)
-        with left: st.pyplot(plot_model(ms,U,title='Deformata',scale=scale,mesh=True))
-        with right: st.pyplot(plot_model(ms,U,vm,title='Tensione equivalente 2D indicativa',scale=scale,mesh=False))
-        fig,ax=plt.subplots(); ax.plot(hist[:,0].astype(float),hist[:,1].astype(float),'o-')
-        ax.set_xlabel('Spostamento imposto δ'); ax.set_ylabel('Reazione totale / profondità'); ax.grid(True,alpha=.3); fig.tight_layout(); st.pyplot(fig)
-        st.download_button('Scarica curva forza–spostamento CSV',csv_history(hist),'forza_spostamento.csv','text/csv')
-        buf=io.StringIO(); buf.write('node,x,y,ux,uy\n')
-        for i,(xy,u) in enumerate(zip(ms['nodes'],U.reshape(-1,2))): buf.write(f'{i},{xy[0]:.12g},{xy[1]:.12g},{u[0]:.12g},{u[1]:.12g}\n')
-        st.download_button('Scarica spostamenti nodali CSV',buf.getvalue(),'spostamenti_nodali.csv','text/csv')
-
-with st.expander('Assunzioni e limiti numerici'):
-    st.markdown('''
-- Piccole deformazioni e deformazione piana; profondità unitaria.
-- Contatto unilaterale senza attrito, discretizzato nodo-segmento con penalty.
-- Triangoli lineari CST: utile per validare l’algoritmo, ma richiede uno studio di convergenza della mesh.
-- La normale di contatto è aggiornata, mentre la tangente trascura i termini geometrici della variazione della normale.
-- Il valore della reazione è raddoppiato perché si usa metà geometria.
-- La tensione equivalente mostrata è una misura 2D indicativa; la verifica finale in plane strain dovrà includere esplicitamente σzz.
-''')
+except Exception as e: st.error(str(e)); st.stop()
+config={'scrollZoom':True,'displaylogo':False}; a,b,c=st.columns(3); a.metric('Nodi',len(model['nodes'])); b.metric('Elementi',len(model['elems'])); c.metric('GDL',2*len(model['nodes']))
+t1,t2,t3=st.tabs(['Geometria','Mesh zoomabile','Soluzione passo-passo'])
+with t1: st.plotly_chart(fig_mesh(model,mesh=False,title='Geometria'),use_container_width=True,config=config)
+with t2: st.plotly_chart(fig_mesh(model,title='Mesh interattiva'),use_container_width=True,config=config)
+with t3:
+    sig=signature(p); cols=st.columns(3)
+    if cols[0].button('Inizializza / Reset',use_container_width=True): st.session_state.S=init_state(model,p); st.session_state.sig=sig
+    disabled='S' not in st.session_state
+    if cols[1].button('Esegui un incremento',type='primary',use_container_width=True,disabled=disabled) and st.session_state.get('sig')==sig: st.session_state.S=one_step(model,p,st.session_state.S)
+    if cols[2].button('Esegui fino alla fine',use_container_width=True,disabled=disabled) and st.session_state.get('sig')==sig:
+        while not st.session_state.S['finished']: st.session_state.S=one_step(model,p,st.session_state.S)
+    if 'S' not in st.session_state: st.info('Inizializzare, poi eseguire un incremento alla volta.')
+    elif st.session_state.get('sig')!=sig: st.warning('Parametri modificati: inizializzare nuovamente.')
+    elif st.session_state.S['step']==0: st.plotly_chart(fig_mesh(model,title='Stato iniziale'),use_container_width=True,config=config)
+    else:
+        S=st.session_state.S; k=st.slider('Incremento da visualizzare',1,S['step'],S['step']); shot=S['shots'][k-1]; row=S['history'][k-1]
+        m=st.columns(5); m[0].metric('Step',f'{k}/{n_steps}'); m[1].metric('δ',f"{shot['delta']:.5g}"); m[2].metric('Reazione',f"{shot['force']:.5g}"); m[3].metric('Contatti',row[2]); m[4].metric('Iterazioni',row[3])
+        st.markdown('**Rombi arancioni:** contatti attivi. **Linee tratteggiate:** proiezione nodo-segmento. Un gap negativo attiva la molla penalty.')
+        x,y=st.columns(2)
+        with x: st.plotly_chart(fig_mesh(model,shot['U'],scale,True,f'Deformata step {k}, scala ×{scale:g}'),use_container_width=True,config=config)
+        with y: st.plotly_chart(fig_contact(model,shot,zoom_w,zoom_h,scale),use_container_width=True,config=config)
+        st.plotly_chart(fig_gap(shot),use_container_width=True,config=config); st.plotly_chart(fig_history(S['history'][:k]),use_container_width=True,config=config)
+        with st.expander('Iterazioni interne dello step'): st.dataframe(shot['log'],use_container_width=True,hide_index=True)
+        st.download_button('Scarica storia CSV',csv_history(S['history']),'storia_incrementale.csv','text/csv')
+with st.expander('Uso dello zoom'): st.write('Rotella: zoom. Trascinamento: rettangolo di zoom. Doppio clic: reset. La barra Plotly consente pan, autoscale e salvataggio PNG.')
