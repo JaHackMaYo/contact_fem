@@ -7,6 +7,43 @@ from matplotlib.collections import PolyCollection
 
 st.set_page_config(page_title='FEM 2D - Contatto semianello', layout='wide')
 
+
+# =============================================================
+# PARAMETRI DI DEFAULT DELL'INTERFACCIA
+# Modificare qui i valori iniziali proposti nella sidebar.
+# Usare un sistema di unita coerente, ad esempio N, mm, N/mm2.
+# =============================================================
+
+# Geometria
+DEFAULT_RI = 40.0
+DEFAULT_RE = 60.0
+DEFAULT_L = 70
+DEFAULT_H = 50
+
+# Materiali elastici lineari isotropi
+DEFAULT_E_RING = 210000.0
+DEFAULT_NU_RING = 0.30
+DEFAULT_E_BLOCK = 30000.0
+DEFAULT_NU_BLOCK = 0.20
+
+# Mesh
+DEFAULT_H_CONTACT = 1.0
+DEFAULT_MESH_GROWTH = 1.22
+DEFAULT_HMAX_FACTOR = 8.0
+
+# Soluzione incrementale e contatto penalty
+DEFAULT_DELTA_MAX = 1.0
+DEFAULT_N_STEPS = 12
+DEFAULT_PENALTY_FACTOR = 50.0
+DEFAULT_MAX_ITER = 35
+DEFAULT_TOL = 1e-7
+DEFAULT_RELAX = 0.80
+
+# Visualizzazione
+DEFAULT_DEFORMATION_SCALE = 1.0
+DEFAULT_ZOOM_WIDTH = 30.0
+DEFAULT_ZOOM_HEIGHT = 8.0
+
 # -----------------------------
 # FEM: materiale ed elemento CST
 # -----------------------------
@@ -297,11 +334,11 @@ def csv_history(H):
 st.title('FEM 2D didattico: contatto semianello-blocco')
 st.caption('Esecuzione incremento per incremento con visualizzazione interattiva dell’active set, del gap e della pressione penalty.')
 with st.sidebar:
-    st.header('Geometria'); ri=st.number_input('Raggio interno ri',.1,value=40.); re=st.number_input('Raggio esterno re',.2,value=60.); L=st.number_input('Semilarghezza L',1.,value=240.); h=st.number_input('Altezza h',1.,value=180.)
-    st.header('Materiali'); E_ring=st.number_input('E semianello',1.,value=210000.); nu_ring=st.number_input('nu semianello',0.,.499,value=.3); E_block=st.number_input('E blocco',1.,value=30000.); nu_block=st.number_input('nu blocco',0.,.499,value=.2)
-    st.header('Mesh'); h_contact=st.number_input('Elemento al contatto',.05,value=2.,step=.25); mesh_growth=st.slider('Crescita elementi',1.02,1.6,1.22,.01); hmax_factor=st.slider('h max / h contatto',2.,20.,8.,.5)
-    st.header('Soluzione'); delta_max=st.number_input('Spostamento massimo',.0001,value=1.); n_steps=st.slider('Incrementi',1,50,12); penalty_factor=st.number_input('Fattore penalty',1.,value=50.); max_iter=st.slider('Iterazioni massime',5,100,35); tol=st.number_input('Tolleranza',value=1e-7,format='%.1e'); relax=st.slider('Rilassamento',.1,1.,.8,.05)
-    st.header('Vista'); scale=st.slider('Scala deformata',0.,20.,1.,.5); zoom_w=st.number_input('Ampiezza zoom contatto',1.,value=30.); zoom_h=st.number_input('Semialtezza zoom',.1,value=8.)
+    st.header('Geometria'); ri=st.number_input('Raggio interno ri',.1,value=DEFAULT_RI); re=st.number_input('Raggio esterno re',.2,value=DEFAULT_RE); L=st.number_input('Semilarghezza L',1.,value=DEFAULT_L); h=st.number_input('Altezza h',1.,value=DEFAULT_H)
+    st.header('Materiali'); E_ring=st.number_input('E semianello',1.,value=DEFAULT_E_RING); nu_ring=st.number_input('nu semianello',0.,.499,value=DEFAULT_NU_RING); E_block=st.number_input('E blocco',1.,value=DEFAULT_E_BLOCK); nu_block=st.number_input('nu blocco',0.,.499,value=DEFAULT_NU_BLOCK)
+    st.header('Mesh'); h_contact=st.number_input('Elemento al contatto',.05,value=DEFAULT_H_CONTACT,step=.25); mesh_growth=st.slider('Crescita elementi',1.02,1.6,DEFAULT_MESH_GROWTH,.01); hmax_factor=st.slider('h max / h contatto',2.,20.,DEFAULT_HMAX_FACTOR,.5)
+    st.header('Soluzione'); delta_max=st.number_input('Spostamento massimo',.0001,value=DEFAULT_DELTA_MAX); n_steps=st.slider('Incrementi',1,50,DEFAULT_N_STEPS); penalty_factor=st.number_input('Fattore penalty',1.,value=DEFAULT_PENALTY_FACTOR); max_iter=st.slider('Iterazioni massime',5,100,DEFAULT_MAX_ITER); tol=st.number_input('Tolleranza',value=DEFAULT_TOL,format='%.1e'); relax=st.slider('Rilassamento',.1,1.,DEFAULT_RELAX,.05)
+    st.header('Vista'); scale=st.slider('Scala deformata',0.,20.,DEFAULT_DEFORMATION_SCALE,.5); zoom_w=st.number_input('Ampiezza zoom contatto',1.,value=DEFAULT_ZOOM_WIDTH); zoom_h=st.number_input('Semialtezza zoom',.1,value=DEFAULT_ZOOM_HEIGHT)
 if not(re>ri and L>re and h>0): st.error('Richiesto re > ri, L > re, h > 0'); st.stop()
 Eeff=2/(1/E_ring+1/E_block); kp=penalty_factor*Eeff/h_contact
 p=dict(ri=ri,re=re,L=L,h=h,E_ring=E_ring,nu_ring=nu_ring,E_block=E_block,nu_block=nu_block,h_contact=h_contact,mesh_growth=mesh_growth,hmax_factor=hmax_factor,delta_max=delta_max,n_steps=n_steps,kp=kp,max_iter=max_iter,tol=tol,relax=relax)
