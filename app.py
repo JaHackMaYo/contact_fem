@@ -17,8 +17,8 @@ st.set_page_config(page_title='FEM 2D - Contatto semianello', layout='wide')
 # Geometria
 DEFAULT_RI = 40.0
 DEFAULT_RE = 60.0
-DEFAULT_L = 70
-DEFAULT_H = 50
+DEFAULT_L = 240.0
+DEFAULT_H = 180.0
 
 # Materiali elastici lineari isotropi
 DEFAULT_E_RING = 210000.0
@@ -27,7 +27,7 @@ DEFAULT_E_BLOCK = 30000.0
 DEFAULT_NU_BLOCK = 0.20
 
 # Mesh
-DEFAULT_H_CONTACT = 1.0
+DEFAULT_H_CONTACT = 2.0
 DEFAULT_MESH_GROWTH = 1.22
 DEFAULT_HMAX_FACTOR = 8.0
 
