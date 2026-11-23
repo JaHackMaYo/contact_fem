@@ -17,8 +17,8 @@ st.set_page_config(page_title='FEM 2D - Contatto semianello', layout='wide')
 # Geometria
 DEFAULT_RI = 40.0
 DEFAULT_RE = 60.0
-DEFAULT_L = 240.0
-DEFAULT_H = 180.0
+DEFAULT_L = 72.0
+DEFAULT_H = 36.0
 
 # Materiali elastici lineari isotropi
 DEFAULT_E_RING = 210000.0
@@ -100,20 +100,40 @@ def mesh_half_ring(ri,re,h_contact,growth,hmax_factor):
     top=np.arange(nt*(nr+1),(nt+1)*(nr+1)); sym=np.arange(nr+1)
     return nodes,np.asarray(elems),contact,top,sym,theta,rs
 
-def mesh_block_from_ring(L,h,rnodes,rcontact,h_contact,growth,hmax_factor):
-    hmax=h_contact*hmax_factor
-    xc=np.unique(np.round(rnodes[rcontact,0],12)); xc.sort(); xe=xc[-1]
-    if L<=xe: raise ValueError('L deve essere maggiore di re.')
-    start=max(h_contact,xc[-1]-xc[-2]); tail=graded_partition(L-xe,start,growth,hmax)
-    xs=np.r_[xc,xe+np.cumsum(tail)]; xs[-1]=L
-    dy=graded_partition(h,h_contact,growth,hmax); ys=-np.r_[0.,np.cumsum(dy)][::-1]; ys[0]=-h; ys[-1]=0.
-    nx=len(xs)-1; ny=len(ys)-1; nodes=np.array([[x,y] for y in ys for x in xs]); elems=[]
+def mesh_block_from_ring(L, h, rnodes, rcontact, h_contact, growth, hmax_factor):
+    """Mesh indipendente del blocco, raffinata solo dalla zona di contatto verso destra.
+
+    Le ascisse dei nodi del semianello non vengono proiettate sul blocco: in questo
+    modo si evita il secondo addensamento, numericamente inutile, vicino a x = re.
+    Il contatto resta nodo-segmento e non richiede nodi contrapposti coincidenti.
+    """
+    hmax = h_contact * hmax_factor
+
+    dx = graded_partition(L, h_contact, growth, hmax)
+    xs = np.r_[0.0, np.cumsum(dx)]
+    xs[-1] = L
+
+    dy = graded_partition(h, h_contact, growth, hmax)
+    ys = -np.r_[0.0, np.cumsum(dy)][::-1]
+    ys[0] = -h
+    ys[-1] = 0.0
+
+    nx = len(xs) - 1
+    ny = len(ys) - 1
+    nodes = np.array([[x, y] for y in ys for x in xs])
+    elems = []
     for j in range(ny):
         for i in range(nx):
-            n0=j*(nx+1)+i; n1=n0+1; n2=n0+nx+1; n3=n2+1
+            n0 = j*(nx+1)+i
+            n1 = n0+1
+            n2 = n0+nx+1
+            n3 = n2+1
             elems += [[n0,n1,n3],[n0,n3,n2]] if (i+j)%2==0 else [[n0,n1,n2],[n1,n3,n2]]
-    top=np.arange(ny*(nx+1),(ny+1)*(nx+1)); bottom=np.arange(nx+1); sym=np.arange(0,(ny+1)*(nx+1),nx+1)
-    return nodes,np.asarray(elems),top,bottom,sym,xs,ys
+
+    top = np.arange(ny*(nx+1), (ny+1)*(nx+1))
+    bottom = np.arange(nx+1)
+    sym = np.arange(0, (ny+1)*(nx+1), nx+1)
+    return nodes, np.asarray(elems), top, bottom, sym, xs, ys
 
 def build_model(p):
     nr,er,rc,rt,rs,theta,radii=mesh_half_ring(p['ri'],p['re'],p['h_contact'],p['mesh_growth'],p['hmax_factor'])
@@ -333,17 +353,82 @@ def csv_history(H):
 
 st.title('FEM 2D didattico: contatto semianello-blocco')
 st.caption('Esecuzione incremento per incremento con visualizzazione interattiva dell’active set, del gap e della pressione penalty.')
+# I widget sono in un form: la modifica dei campi non rigenera il modello.
+# I nuovi valori diventano attivi solo premendo il pulsante Aggiorna modello.
 with st.sidebar:
-    st.header('Geometria'); ri=st.number_input('Raggio interno ri',.1,value=DEFAULT_RI); re=st.number_input('Raggio esterno re',.2,value=DEFAULT_RE); L=st.number_input('Semilarghezza L',1.,value=DEFAULT_L); h=st.number_input('Altezza h',1.,value=DEFAULT_H)
-    st.header('Materiali'); E_ring=st.number_input('E semianello',1.,value=DEFAULT_E_RING); nu_ring=st.number_input('nu semianello',0.,.499,value=DEFAULT_NU_RING); E_block=st.number_input('E blocco',1.,value=DEFAULT_E_BLOCK); nu_block=st.number_input('nu blocco',0.,.499,value=DEFAULT_NU_BLOCK)
-    st.header('Mesh'); h_contact=st.number_input('Elemento al contatto',.05,value=DEFAULT_H_CONTACT,step=.25); mesh_growth=st.slider('Crescita elementi',1.02,1.6,DEFAULT_MESH_GROWTH,.01); hmax_factor=st.slider('h max / h contatto',2.,20.,DEFAULT_HMAX_FACTOR,.5)
-    st.header('Soluzione'); delta_max=st.number_input('Spostamento massimo',.0001,value=DEFAULT_DELTA_MAX); n_steps=st.slider('Incrementi',1,50,DEFAULT_N_STEPS); penalty_factor=st.number_input('Fattore penalty',1.,value=DEFAULT_PENALTY_FACTOR); max_iter=st.slider('Iterazioni massime',5,100,DEFAULT_MAX_ITER); tol=st.number_input('Tolleranza',value=DEFAULT_TOL,format='%.1e'); relax=st.slider('Rilassamento',.1,1.,DEFAULT_RELAX,.05)
-    st.header('Vista'); scale=st.slider('Scala deformata',0.,20.,DEFAULT_DEFORMATION_SCALE,.5); zoom_w=st.number_input('Ampiezza zoom contatto',1.,value=DEFAULT_ZOOM_WIDTH); zoom_h=st.number_input('Semialtezza zoom',.1,value=DEFAULT_ZOOM_HEIGHT)
-if not(re>ri and L>re and h>0): st.error('Richiesto re > ri, L > re, h > 0'); st.stop()
-Eeff=2/(1/E_ring+1/E_block); kp=penalty_factor*Eeff/h_contact
-p=dict(ri=ri,re=re,L=L,h=h,E_ring=E_ring,nu_ring=nu_ring,E_block=E_block,nu_block=nu_block,h_contact=h_contact,mesh_growth=mesh_growth,hmax_factor=hmax_factor,delta_max=delta_max,n_steps=n_steps,kp=kp,max_iter=max_iter,tol=tol,relax=relax)
-try: model=build_model(p)
-except Exception as e: st.error(str(e)); st.stop()
+    with st.form('model_parameters_form'):
+        st.header('Geometria')
+        ri_input = st.number_input('Raggio interno ri', .1, value=DEFAULT_RI)
+        re_input = st.number_input('Raggio esterno re', .2, value=DEFAULT_RE)
+        L_input = st.number_input('Semilarghezza L', 1., value=DEFAULT_L)
+        h_input = st.number_input('Altezza h', 1., value=DEFAULT_H)
+
+        st.header('Materiali')
+        E_ring_input = st.number_input('E semianello', 1., value=DEFAULT_E_RING)
+        nu_ring_input = st.number_input('nu semianello', 0., .499, value=DEFAULT_NU_RING)
+        E_block_input = st.number_input('E blocco', 1., value=DEFAULT_E_BLOCK)
+        nu_block_input = st.number_input('nu blocco', 0., .499, value=DEFAULT_NU_BLOCK)
+
+        st.header('Mesh')
+        h_contact_input = st.number_input('Elemento al contatto', .05, value=DEFAULT_H_CONTACT, step=.25)
+        mesh_growth_input = st.slider('Crescita elementi', 1.02, 1.6, DEFAULT_MESH_GROWTH, .01)
+        hmax_factor_input = st.slider('h max / h contatto', 2., 20., DEFAULT_HMAX_FACTOR, .5)
+
+        st.header('Soluzione')
+        delta_max_input = st.number_input('Spostamento massimo', .0001, value=DEFAULT_DELTA_MAX)
+        n_steps_input = st.slider('Incrementi', 1, 50, DEFAULT_N_STEPS)
+        penalty_factor_input = st.number_input('Fattore penalty', 1., value=DEFAULT_PENALTY_FACTOR)
+        max_iter_input = st.slider('Iterazioni massime', 5, 100, DEFAULT_MAX_ITER)
+        tol_input = st.number_input('Tolleranza', value=DEFAULT_TOL, format='%.1e')
+        relax_input = st.slider('Rilassamento', .1, 1., DEFAULT_RELAX, .05)
+
+        update_model = st.form_submit_button('Aggiorna modello', type='primary', use_container_width=True)
+
+    st.header('Vista')
+    scale = st.slider('Scala deformata', 0., 20., DEFAULT_DEFORMATION_SCALE, .5)
+    zoom_w = st.number_input('Ampiezza zoom contatto', 1., value=DEFAULT_ZOOM_WIDTH)
+    zoom_h = st.number_input('Semialtezza zoom', .1, value=DEFAULT_ZOOM_HEIGHT)
+
+if 'active_parameters' not in st.session_state:
+    initial_Eeff = 2.0 / (1.0/DEFAULT_E_RING + 1.0/DEFAULT_E_BLOCK)
+    st.session_state.active_parameters = dict(
+        ri=DEFAULT_RI, re=DEFAULT_RE, L=DEFAULT_L, h=DEFAULT_H,
+        E_ring=DEFAULT_E_RING, nu_ring=DEFAULT_NU_RING,
+        E_block=DEFAULT_E_BLOCK, nu_block=DEFAULT_NU_BLOCK,
+        h_contact=DEFAULT_H_CONTACT, mesh_growth=DEFAULT_MESH_GROWTH,
+        hmax_factor=DEFAULT_HMAX_FACTOR, delta_max=DEFAULT_DELTA_MAX,
+        n_steps=DEFAULT_N_STEPS,
+        kp=DEFAULT_PENALTY_FACTOR*initial_Eeff/DEFAULT_H_CONTACT,
+        max_iter=DEFAULT_MAX_ITER, tol=DEFAULT_TOL, relax=DEFAULT_RELAX
+    )
+
+if update_model:
+    if not (re_input > ri_input and L_input > re_input and h_input > 0):
+        st.sidebar.error('Richiesto: re > ri, L > re e h > 0.')
+    else:
+        Eeff_input = 2.0 / (1.0/E_ring_input + 1.0/E_block_input)
+        st.session_state.active_parameters = dict(
+            ri=ri_input, re=re_input, L=L_input, h=h_input,
+            E_ring=E_ring_input, nu_ring=nu_ring_input,
+            E_block=E_block_input, nu_block=nu_block_input,
+            h_contact=h_contact_input, mesh_growth=mesh_growth_input,
+            hmax_factor=hmax_factor_input, delta_max=delta_max_input,
+            n_steps=n_steps_input,
+            kp=penalty_factor_input*Eeff_input/h_contact_input,
+            max_iter=max_iter_input, tol=tol_input, relax=relax_input
+        )
+        # Una nuova geometria/materiale rende incompatibile l'eventuale soluzione precedente.
+        st.session_state.pop('S', None)
+        st.session_state.pop('sig', None)
+        st.sidebar.success('Modello aggiornato.')
+
+p = st.session_state.active_parameters
+try:
+    model = build_model(p)
+except Exception as e:
+    st.error(str(e))
+    st.stop()
+
 config={'scrollZoom':True,'displaylogo':False}; a,b,c=st.columns(3); a.metric('Nodi',len(model['nodes'])); b.metric('Elementi',len(model['elems'])); c.metric('GDL',2*len(model['nodes']))
 t1,t2,t3=st.tabs(['Geometria','Mesh zoomabile','Soluzione passo-passo'])
 with t1: st.plotly_chart(fig_mesh(model,mesh=False,title='Geometria'),use_container_width=True,config=config)
@@ -373,7 +458,7 @@ with t3:
             )
         shot = S['shots'][k-1]
         row = S['history'][k-1]
-        m=st.columns(5); m[0].metric('Step',f'{k}/{n_steps}'); m[1].metric('δ',f"{shot['delta']:.5g}"); m[2].metric('Reazione',f"{shot['force']:.5g}"); m[3].metric('Contatti',row[2]); m[4].metric('Iterazioni',row[3])
+        m=st.columns(5); m[0].metric('Step',f"{k}/{p['n_steps']}"); m[1].metric('δ',f"{shot['delta']:.5g}"); m[2].metric('Reazione',f"{shot['force']:.5g}"); m[3].metric('Contatti',row[2]); m[4].metric('Iterazioni',row[3])
         st.markdown('**Rombi arancioni:** contatti attivi. **Linee tratteggiate:** proiezione nodo-segmento. Un gap negativo attiva la molla penalty.')
         x,y=st.columns(2)
         with x: st.plotly_chart(fig_mesh(model,shot['U'],scale,True,f'Deformata step {k}, scala ×{scale:g}'),use_container_width=True,config=config)
