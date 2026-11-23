@@ -36,53 +36,56 @@ def element_dofs(conn):
 # -----------------------------
 # Mesh strutturate scritte da zero
 # -----------------------------
-def mesh_block(L, h, nx, ny, grading_y):
-    xs = np.linspace(0.0, L, nx+1)
-    s = np.linspace(0.0, 1.0, ny+1)
-    # indice j=0 alla base; addensamento verso y=0 (sommità)
-    ys = -h * (1.0 - s**grading_y)
-    nodes = np.array([[x,y] for y in ys for x in xs], dtype=float)
-    elems = []
-    for j in range(ny):
-        for i in range(nx):
-            n0=j*(nx+1)+i; n1=n0+1; n2=n0+(nx+1); n3=n2+1
-            if (i+j)%2 == 0:
-                elems += [[n0,n1,n3],[n0,n3,n2]]
-            else:
-                elems += [[n0,n1,n2],[n1,n3,n2]]
-    top = np.arange(ny*(nx+1), (ny+1)*(nx+1), dtype=int)
-    bottom = np.arange(0, nx+1, dtype=int)
-    sym = np.arange(0, (ny+1)*(nx+1), nx+1, dtype=int)
-    return nodes, np.asarray(elems,int), top, bottom, sym
+def graded_partition(total,h0,growth=1.25,hmax=None,max_cells=300):
+    """Lunghezze crescenti da h0, con chiusura esatta del dominio."""
+    if total<=0 or h0<=0 or growth<1: raise ValueError('Richiesti total>0, h0>0 e growth>=1.')
+    hmax=total if hmax is None else max(h0,hmax); sizes=[]; rem=float(total); hi=min(h0,rem)
+    while rem>1e-12*max(1.,total):
+        if len(sizes)>=max_cells: raise ValueError('Mesh troppo fitta: aumentare la dimensione al contatto.')
+        use=min(hi,hmax,rem)
+        if 0<rem-use<0.35*use: use=rem
+        sizes.append(use); rem-=use; hi=min(hi*growth,hmax)
+    sizes=np.asarray(sizes,float); sizes*=total/sizes.sum(); return sizes
 
-
-def mesh_half_ring(ri, re, nr, nt, grading_theta):
-    # mezzo modello destro: theta da -pi/2 (contatto) a 0 (superficie caricata)
-    rs = np.linspace(ri, re, nr+1)
-    q = np.linspace(0.0, 1.0, nt+1)
-    theta = -0.5*np.pi + 0.5*np.pi*(q**grading_theta)  # addensa vicino al contatto
-    yc = re
-    nodes = np.array([[r*np.cos(t), yc+r*np.sin(t)] for t in theta for r in rs], dtype=float)
-    elems=[]
+def mesh_half_ring(ri,re,h_contact,growth,hmax_factor):
+    hmax=h_contact*hmax_factor
+    arcs=graded_partition(.5*np.pi*re,h_contact,growth,hmax)
+    theta=-.5*np.pi+np.r_[0.,np.cumsum(arcs)/re]; theta[-1]=0.
+    dr=graded_partition(re-ri,h_contact,growth,hmax)
+    rs=(re-np.r_[0.,np.cumsum(dr)])[::-1]; rs[0]=ri
+    yc=re; nodes=np.array([[r*np.cos(t),yc+r*np.sin(t)] for t in theta for r in rs])
+    nr=len(rs)-1; nt=len(theta)-1; elems=[]
     for j in range(nt):
         for i in range(nr):
-            n0=j*(nr+1)+i; n1=n0+1; n2=n0+(nr+1); n3=n2+1
-            elems += [[n0,n1,n3],[n0,n3,n2]]
-    contact = np.array([j*(nr+1)+nr for j in range(nt+1)],int)
-    top = np.arange(nt*(nr+1), (nt+1)*(nr+1), dtype=int)
-    sym = np.arange(0, nr+1, dtype=int)  # theta=-pi/2, x=0
-    return nodes, np.asarray(elems,int), contact, top, sym
+            n0=j*(nr+1)+i; n1=n0+1; n2=n0+nr+1; n3=n2+1
+            elems += [[n0,n1,n3],[n0,n3,n2]] if (i+j)%2==0 else [[n0,n1,n2],[n1,n3,n2]]
+    contact=np.array([j*(nr+1)+nr for j in range(nt+1)],int)
+    top=np.arange(nt*(nr+1),(nt+1)*(nr+1)); sym=np.arange(nr+1)
+    return nodes,np.asarray(elems),contact,top,sym,theta,rs
 
+def mesh_block_from_ring(L,h,rnodes,rcontact,h_contact,growth,hmax_factor):
+    hmax=h_contact*hmax_factor
+    xc=np.unique(np.round(rnodes[rcontact,0],12)); xc.sort(); xe=xc[-1]
+    if L<=xe: raise ValueError('L deve essere maggiore di re.')
+    start=max(h_contact,xc[-1]-xc[-2]); tail=graded_partition(L-xe,start,growth,hmax)
+    xs=np.r_[xc,xe+np.cumsum(tail)]; xs[-1]=L
+    dy=graded_partition(h,h_contact,growth,hmax); ys=-np.r_[0.,np.cumsum(dy)][::-1]; ys[0]=-h; ys[-1]=0.
+    nx=len(xs)-1; ny=len(ys)-1; nodes=np.array([[x,y] for y in ys for x in xs]); elems=[]
+    for j in range(ny):
+        for i in range(nx):
+            n0=j*(nx+1)+i; n1=n0+1; n2=n0+nx+1; n3=n2+1
+            elems += [[n0,n1,n3],[n0,n3,n2]] if (i+j)%2==0 else [[n0,n1,n2],[n1,n3,n2]]
+    top=np.arange(ny*(nx+1),(ny+1)*(nx+1)); bottom=np.arange(nx+1); sym=np.arange(0,(ny+1)*(nx+1),nx+1)
+    return nodes,np.asarray(elems),top,bottom,sym,xs,ys
 
 def build_model(p):
-    nb, eb, btop, bbottom, bsym = mesh_block(p['L'],p['h'],p['nx'],p['ny'],p['grading_y'])
-    nr, er, rcontact, rtop, rsym = mesh_half_ring(p['ri'],p['re'],p['nr'],p['nt'],p['grading_theta'])
-    off=len(nb); nodes=np.vstack([nb,nr]); elems=np.vstack([eb,er+off])
-    mats=np.r_[np.zeros(len(eb),int),np.ones(len(er),int)]
-    return dict(nodes=nodes, elems=elems, mats=mats, nblock=len(nb),
-                block_top=btop, block_bottom=bbottom, block_sym=bsym,
-                ring_contact=rcontact+off, ring_top=rtop+off, ring_sym=rsym+off)
-
+    nr,er,rc,rt,rs,theta,radii=mesh_half_ring(p['ri'],p['re'],p['h_contact'],p['mesh_growth'],p['hmax_factor'])
+    nb,eb,bt,bb,bs,xs,ys=mesh_block_from_ring(p['L'],p['h'],nr,rc,p['h_contact'],p['mesh_growth'],p['hmax_factor'])
+    off=len(nb); nodes=np.vstack([nb,nr]); elems=np.vstack([eb,er+off]); mats=np.r_[np.zeros(len(eb),int),np.ones(len(er),int)]
+    return dict(nodes=nodes,elems=elems,mats=mats,nblock=len(nb),block_top=bt,block_bottom=bb,block_sym=bs,
+                ring_contact=rc+off,ring_top=rt+off,ring_sym=rs+off,
+                mesh_info=dict(nx=len(xs)-1,ny=len(ys)-1,nr=len(radii)-1,nt=len(theta)-1,
+                min_dx=np.min(np.diff(xs)),max_dx=np.max(np.diff(xs)),min_dy=np.min(np.diff(ys)),max_dy=np.max(np.diff(ys))))
 # -----------------------------
 # Assemblaggio e contatto
 # -----------------------------
@@ -217,13 +220,11 @@ with st.sidebar:
     nu_ring=st.number_input('nu semianello',0.0,0.499,value=0.30,format='%.3f')
     E_block=st.number_input('E blocco',1.0,value=30000.0)
     nu_block=st.number_input('nu blocco',0.0,0.499,value=0.20,format='%.3f')
-    st.header('Mesh')
-    nx=st.slider('Divisioni blocco in x',8,80,32)
-    ny=st.slider('Divisioni blocco in y',4,50,16)
-    nr=st.slider('Divisioni radiali semianello',2,20,6)
-    nt=st.slider('Divisioni angolari semianello',8,80,28)
-    grading_y=st.slider('Addensamento verticale blocco',1.0,4.0,2.0,.1)
-    grading_theta=st.slider('Addensamento arco verso contatto',1.0,4.0,2.0,.1)
+    st.header('Mesh guidata dal contatto')
+    h_contact=st.number_input('Dimensione elemento al contatto',0.05,value=2.0,step=0.25,
+                              help='Lunghezza obiettivo sul bordo esterno del semianello e sulla superficie del blocco.')
+    mesh_growth=st.slider('Fattore crescita elementi',1.02,1.60,1.22,.01)
+    hmax_factor=st.slider('Dimensione massima / dimensione contatto',2.0,20.0,8.0,.5)
     st.header('Soluzione')
     delta_max=st.number_input('Spostamento massimo',0.0001,value=1.0,format='%.4f')
     n_steps=st.slider('Incrementi',1,50,12)
@@ -233,10 +234,10 @@ with st.sidebar:
     relax=st.slider('Rilassamento',0.1,1.0,0.8,.05)
 
 if not (re>ri and L>re and h>0): st.error('Richiesto: re > ri, L > re e h > 0.'); st.stop()
-# scala penalty: E_eff / h_contact, con h_contact circa L/nx
-Eeff=2.0/(1.0/E_ring+1.0/E_block); kp=penalty_factor*Eeff/(L/nx)
+# scala penalty coerente con la dimensione locale del contatto
+Eeff=2.0/(1.0/E_ring+1.0/E_block); kp=penalty_factor*Eeff/h_contact
 p=dict(ri=ri,re=re,L=L,h=h,E_ring=E_ring,nu_ring=nu_ring,E_block=E_block,nu_block=nu_block,
-       nx=nx,ny=ny,nr=nr,nt=nt,grading_y=grading_y,grading_theta=grading_theta,
+       h_contact=h_contact,mesh_growth=mesh_growth,hmax_factor=hmax_factor,
        delta_max=delta_max,n_steps=n_steps,kp=kp,max_iter=max_iter,tol=tol,relax=relax)
 
 try: model=build_model(p)
@@ -245,6 +246,7 @@ except Exception as ex: st.error(str(ex)); st.stop()
 c1,c2,c3,c4=st.columns(4)
 c1.metric('Nodi',len(model['nodes'])); c2.metric('Elementi CST',len(model['elems']))
 c3.metric('GDL',2*len(model['nodes'])); c4.metric('Penalty kc',f'{kp:.3g}')
+mi=model['mesh_info']; st.caption(f"Mesh derivata: semianello {mi['nt']} settori × {mi['nr']} strati; blocco {mi['nx']} × {mi['ny']} celle. Passi x: {mi['min_dx']:.3g}–{mi['max_dx']:.3g}; passi y: {mi['min_dy']:.3g}–{mi['max_dy']:.3g}.")
 
 tab1,tab2,tab3=st.tabs(['Geometria','Mesh','Soluzione e risultati'])
 with tab1:
@@ -252,7 +254,7 @@ with tab1:
     st.info('Il centro del semianello è a y = re; il punto esterno inferiore è inizialmente a y = 0. Lo spostamento è imposto sul bordo radiale orizzontale a destra.')
 with tab2:
     st.pyplot(plot_model(model,mesh=True,title='Mesh strutturata parametrica'))
-    st.write('Il grading verticale addensa il blocco verso la superficie di contatto; il grading angolare addensa il semianello verso il punto inferiore.')
+    st.write('La dimensione scelta al contatto genera la discretizzazione dell’arco esterno. Le stesse ascisse sono trasferite alla superficie del blocco; gli elementi crescono poi gradualmente verso destra, in profondità e attraverso lo spessore del semianello.')
 with tab3:
     if st.button('Risolvi',type='primary',use_container_width=True):
         prog=st.progress(0,text='Preparazione')
@@ -266,7 +268,7 @@ with tab3:
             prog.empty(); st.exception(ex)
     if 'solution' in st.session_state:
         ps,ms,U,hist,vm,syy,cdata=st.session_state['solution']
-        if any(ps[k]!=p[k] for k in ['ri','re','L','h','nx','ny','nr','nt','delta_max','kp']):
+        if any(ps[k]!=p[k] for k in ['ri','re','L','h','h_contact','mesh_growth','hmax_factor','delta_max','kp']):
             st.warning('I parametri sono cambiati dopo l’ultima soluzione. Premere nuovamente Risolvi.')
         last=hist[-1]; a,b,c,d=st.columns(4)
         a.metric('δ raggiunto',f'{float(last[0]):.5g}')
